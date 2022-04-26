@@ -20,23 +20,36 @@
 
 <script class="next-config" data-name="main" type="application/json">{"hostname":"example.com","root":"/","images":"/images","scheme":"Gemini","darkmode":false,"version":"8.10.0","exturl":false,"sidebar":{"position":"left","display":"post","padding":18,"offset":12},"copycode":false,"bookmark":{"enable":false,"color":"#222","save":"auto"},"mediumzoom":false,"lazyload":false,"pangu":false,"comments":{"style":"tabs","active":null,"storage":true,"lazyload":false,"nav":null},"stickytabs":false,"motion":{"enable":true,"async":false,"transition":{"post_block":"fadeIn","post_header":"fadeInDown","post_body":"fadeInDown","coll_header":"fadeInLeft","sidebar":"fadeInUp"}},"prism":false,"i18n":{"placeholder":"搜索...","empty":"没有找到任何搜索结果：${query}","hits_time":"找到 ${hits} 个搜索结果（用时 ${time} 毫秒）","hits":"找到 ${hits} 个搜索结果"}}</script><script src="/js/config.js"></script>
 
-  <meta property="og:type" content="website">
-<meta property="og:title" content="i4never&#39;s">
-<meta property="og:url" content="http://example.com/index.html">
+  <meta name="description" content="这几天重构了一版生成模型。相较于各种各样的nlu任务、自然语言生成在工业中的应用并不多，一是由于实际场景下往往需要目标文本“受控”，二是生成过程自回归，无论有多大算力，仍然需要一个个token往外蹦。encoder-decoder架构下的自回归语言模型，如果不做任何优化，整个序列的计算复杂度是长度的三次项。本文旨在讨论解码过程中的性能优化。阅读本文，你需要知道seq2seq模型、了解attenti">
+<meta property="og:type" content="article">
+<meta property="og:title" content="关于Seq2Seq的增量解码">
+<meta property="og:url" content="http://example.com/2022/02/21/incremental-decoder/index.html">
 <meta property="og:site_name" content="i4never&#39;s">
+<meta property="og:description" content="这几天重构了一版生成模型。相较于各种各样的nlu任务、自然语言生成在工业中的应用并不多，一是由于实际场景下往往需要目标文本“受控”，二是生成过程自回归，无论有多大算力，仍然需要一个个token往外蹦。encoder-decoder架构下的自回归语言模型，如果不做任何优化，整个序列的计算复杂度是长度的三次项。本文旨在讨论解码过程中的性能优化。阅读本文，你需要知道seq2seq模型、了解attenti">
 <meta property="og:locale" content="zh_CN">
+<meta property="og:image" content="http://example.com/post_images/incremental-decoder__model.drawio.svg">
+<meta property="og:image" content="http://example.com/post_images/incremental-decoder__self-att-mask.drawio.svg">
+<meta property="og:image" content="http://example.com/post_images/incremental-decoder__self-att-cal.drawio.svg">
+<meta property="og:image" content="http://example.com/post_images/incremental-decoder__cross-att-mask.drawio.svg">
+<meta property="og:image" content="http://example.com/post_images/incremental-decoder__cal_ratio.png">
+<meta property="article:published_time" content="2022-02-21T15:25:19.000Z">
+<meta property="article:modified_time" content="2022-04-26T16:10:46.089Z">
 <meta property="article:author" content="i4never">
+<meta property="article:tag" content="NLG">
+<meta property="article:tag" content="Decoder">
+<meta property="article:tag" content="加速">
 <meta name="twitter:card" content="summary">
+<meta name="twitter:image" content="http://example.com/post_images/incremental-decoder__model.drawio.svg">
 
 
-<link rel="canonical" href="http://example.com/">
+<link rel="canonical" href="http://example.com/2022/02/21/incremental-decoder/">
 
 
 
-<script class="next-config" data-name="page" type="application/json">{"sidebar":"","isHome":true,"isPost":false,"lang":"zh-CN","comments":"","permalink":"","path":"index.html","title":""}</script>
+<script class="next-config" data-name="page" type="application/json">{"sidebar":"","isHome":false,"isPost":true,"lang":"zh-CN","comments":true,"permalink":"http://example.com/2022/02/21/incremental-decoder/","path":"2022/02/21/incremental-decoder/","title":"关于Seq2Seq的增量解码"}</script>
 
 <script class="next-config" data-name="calendar" type="application/json">""</script>
-<title>i4never's</title>
+<title>关于Seq2Seq的增量解码 | i4never's</title>
   
 
 
@@ -175,7 +188,7 @@ mjx-container[display="true"] + br {
 
     <a href="/" class="brand" rel="start">
       <i class="logo-line"></i>
-      <h1 class="site-title">i4never's</h1>
+      <p class="site-title">i4never's</p>
       <i class="logo-line"></i>
     </a>
   </div>
@@ -203,7 +216,7 @@ mjx-container[display="true"] + br {
 
   <aside class="sidebar">
 
-    <div class="sidebar-inner sidebar-overview-active">
+    <div class="sidebar-inner sidebar-nav-active sidebar-toc-active">
       <ul class="sidebar-nav">
         <li class="sidebar-nav-toc">
           文章目录
@@ -216,6 +229,7 @@ mjx-container[display="true"] + br {
       <div class="sidebar-panel-container">
         <!--noindex-->
         <div class="post-toc-wrap sidebar-panel">
+            <div class="post-toc animated"><ol class="nav"><li class="nav-item nav-level-2"><a class="nav-link" href="#%E6%A8%A1%E5%9E%8B%E7%BB%93%E6%9E%84"><span class="nav-number">1.</span> <span class="nav-text">模型结构</span></a></li><li class="nav-item nav-level-2"><a class="nav-link" href="#%E4%B8%80%E4%BA%9B%E8%83%8C%E6%99%AF"><span class="nav-number">2.</span> <span class="nav-text">一些背景</span></a></li><li class="nav-item nav-level-2"><a class="nav-link" href="#Encoder%E5%8A%A0%E9%80%9F"><span class="nav-number">3.</span> <span class="nav-text">Encoder加速</span></a></li><li class="nav-item nav-level-2"><a class="nav-link" href="#Decoder%E5%8A%A0%E9%80%9F"><span class="nav-number">4.</span> <span class="nav-text">Decoder加速</span></a><ol class="nav-child"><li class="nav-item nav-level-3"><a class="nav-link" href="#FFN%E4%B8%8EAdd-amp-LayerNorm"><span class="nav-number">4.1.</span> <span class="nav-text">FFN与Add &amp; LayerNorm</span></a></li><li class="nav-item nav-level-3"><a class="nav-link" href="#Decoder-Self-Attention"><span class="nav-number">4.2.</span> <span class="nav-text">Decoder Self-Attention</span></a></li><li class="nav-item nav-level-3"><a class="nav-link" href="#Decoder-Cross-Attention"><span class="nav-number">4.3.</span> <span class="nav-text">Decoder Cross-Attention</span></a></li></ol></li><li class="nav-item nav-level-2"><a class="nav-link" href="#%E8%AE%A1%E7%AE%97%E9%87%8F"><span class="nav-number">5.</span> <span class="nav-text">计算量</span></a><ol class="nav-child"><li class="nav-item nav-level-3"><a class="nav-link" href="#FFN"><span class="nav-number">5.1.</span> <span class="nav-text">FFN</span></a></li><li class="nav-item nav-level-3"><a class="nav-link" href="#Decoder-Self-Attention-1"><span class="nav-number">5.2.</span> <span class="nav-text">Decoder Self-Attention</span></a></li><li class="nav-item nav-level-3"><a class="nav-link" href="#Decoder-Cross-Attention-1"><span class="nav-number">5.3.</span> <span class="nav-text">Decoder Cross-Attention</span></a></li><li class="nav-item nav-level-3"><a class="nav-link" href="#Total"><span class="nav-number">5.4.</span> <span class="nav-text">Total</span></a></li></ol></li><li class="nav-item nav-level-2"><a class="nav-link" href="#Code"><span class="nav-number">6.</span> <span class="nav-text">Code</span></a></li><li class="nav-item nav-level-2"><a class="nav-link" href="#%E6%80%BB%E7%BB%93"><span class="nav-number">7.</span> <span class="nav-text">总结</span></a></li><li class="nav-item nav-level-2"><a class="nav-link" href="#Reference"><span class="nav-number">8.</span> <span class="nav-text">Reference</span></a></li></ol></div>
         </div>
         <!--/noindex-->
 
@@ -261,16 +275,17 @@ mjx-container[display="true"] + br {
 </noscript>
 
 
-    <div class="main-inner index posts-expand">
+    <div class="main-inner post posts-expand">
 
-    
+
+  
 
 
 <div class="post-block">
   
   
 
-  <article itemscope itemtype="http://schema.org/Article" class="post-content" lang="">
+  <article itemscope itemtype="http://schema.org/Article" class="post-content" lang="zh-CN">
     <link itemprop="mainEntityOfPage" href="http://example.com/2022/02/21/incremental-decoder/">
 
     <span hidden itemprop="author" itemscope itemtype="http://schema.org/Person">
@@ -283,9 +298,9 @@ mjx-container[display="true"] + br {
       <meta itemprop="name" content="i4never's">
     </span>
       <header class="post-header">
-        <h2 class="post-title" itemprop="name headline">
-          <a href="/2022/02/21/incremental-decoder/" class="post-title-link" itemprop="url">关于Seq2Seq的增量解码</a>
-        </h2>
+        <h1 class="post-title" itemprop="name headline">
+          关于Seq2Seq的增量解码
+        </h1>
 
         <div class="post-meta-container">
           <div class="post-meta">
@@ -315,7 +330,7 @@ mjx-container[display="true"] + br {
     
     
     <div class="post-body" itemprop="articleBody">
-          <p>这几天重构了一版生成模型。相较于各种各样的nlu任务、自然语言生成在工业中的应用并不多，一是由于实际场景下往往需要目标文本“受控”，二是生成过程自回归，无论有多大算力，仍然需要一个个token往外蹦。encoder-decoder架构下的自回归语言模型，如果不做任何优化，整个序列的计算复杂度是长度的三次项。本文旨在讨论解码过程中的性能优化。阅读本文，你需要知道seq2seq模型、了解attention结构、听说过bert/bart，并且最好熟悉tf1.x框架。文中不含开箱即跑的脚本/代码，但是如果你正在寻求加快生成的方法，那么文中的代码片段或许对你有参考价值。</p>
+        <p>这几天重构了一版生成模型。相较于各种各样的nlu任务、自然语言生成在工业中的应用并不多，一是由于实际场景下往往需要目标文本“受控”，二是生成过程自回归，无论有多大算力，仍然需要一个个token往外蹦。encoder-decoder架构下的自回归语言模型，如果不做任何优化，整个序列的计算复杂度是长度的三次项。本文旨在讨论解码过程中的性能优化。阅读本文，你需要知道seq2seq模型、了解attention结构、听说过bert/bart，并且最好熟悉tf1.x框架。文中不含开箱即跑的脚本/代码，但是如果你正在寻求加快生成的方法，那么文中的代码片段或许对你有参考价值。</p>
 <h2 id="模型结构"><a href="#模型结构" class="headerlink" title="模型结构"></a>模型结构</h2><p>seq2seq的模型结构参考bart，bert的后一半取出做decoder，参数量与bert-base相当，6层encoder，6层decoder。</p>
 <p><img src="/post_images/incremental-decoder__model.drawio.svg" alt="模型结构"></p>
 <p>训练任务以seq2seq的方式组织。</p>
@@ -501,7 +516,6 @@ mjx-container[display="true"] + br {
 <h2 id="Reference"><a href="#Reference" class="headerlink" title="Reference"></a>Reference</h2><p>【1】<a target="_blank" rel="noopener" href="https://spaces.ac.cn/archives/8610" title="线性Transformer应该不是你要的模型">https://spaces.ac.cn/archives/8610</a> “线性Transformer应该不是你要的模型”</p>
 <p>【2】[<a target="_blank" rel="noopener" href="https://www.telesens.co/2019/04/21/understanding-incremental-decoding-in-fairseq/]">https://www.telesens.co/2019/04/21/understanding-incremental-decoding-in-fairseq/]</a> “Understanding Incremental Decoding In Fairseq”</p>
 
-      
     </div>
 
     
@@ -509,11 +523,18 @@ mjx-container[display="true"] + br {
     
 
     <footer class="post-footer">
-        <div class="post-eof"></div>
-      
+          <div class="post-tags">
+              <a href="/tags/NLG/" rel="tag"># NLG</a>
+              <a href="/tags/Decoder/" rel="tag"># Decoder</a>
+              <a href="/tags/%E5%8A%A0%E9%80%9F/" rel="tag"># 加速</a>
+          </div>
+
+        
+
     </footer>
   </article>
 </div>
+
 
 
 
