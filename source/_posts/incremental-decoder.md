@@ -36,7 +36,7 @@ $$
 
 “MultiHead”没有体现在公式上，实现中添加几个reshape就能做到多头的效果。如果qkv相同，MHA就叫做self-attention，常用在Encoder部分；如果q与kv来自两个输入，MHA叫做cross-attention，常用在Decoder部分。
 
-MHA的实现可以参考[google-research/bert](https://github.com/google-research/bert/blob/eedf5716ce1268e56f0a50264a88cafad334ac61/modeling.py#L558)。
+MHA的实现可以参考[google-research/bert][1]。
 
 ## Encoder加速
 
@@ -90,7 +90,7 @@ decoder的cross-attention部分，训练时att-score会有正方形的mask。不
 
 ## 计算量
 
-[《线性Transformer应该不是你要的模型》][1]一文中有对计算量的评估，假设$n$为序列长度，$d$为head_size（64），$h$为head的数目（12），$hd$为常说的 hidden_size（768）。我们来看看缓存下的增量解码理论上的计算量评估。
+[《线性Transformer应该不是你要的模型》][2]一文中有对计算量的评估，假设$n$为序列长度，$d$为head_size（64），$h$为head的数目（12），$hd$为常说的 hidden_size（768）。我们来看看缓存下的增量解码理论上的计算量评估。
 
 ### FFN
 
@@ -337,6 +337,10 @@ def multi_head_attention(query: tf.Tensor,
 除了缓存，对语料使用sentencepiece或者其他wordpiece方式缩短目标序列长度，也可以加速生成。费劲周折，实现后发现，在k8s的4c机器下，无缓存生成150个token需要30s左右，缓存下为4s左右。但是，如果有块gpu，目标文本长度在200左右的情况下，用不用缓存没多大区别。（ORZ）
 
 ## Reference
+1. [google bert mha][1]
+2. [线性Transformer应该不是你要的模型][2]
+3. [Understanding incremental decoding in fairseq][3]
 
-[1]: https://spaces.ac.cn/archives/8610	"线性Transformer应该不是你要的模型"
-[2]: https://www.telesens.co/2019/04/21/understanding-incremental-decoding-in-fairseq/
+[1]: https://github.com/google-research/bert/blob/eedf5716ce1268e56f0a50264a88cafad334ac61/modeling.py#L558 "google bert mha"
+[2]: https://spaces.ac.cn/archives/8610 "线性Transformer应该不是你要的模型"
+[3]: https://www.telesens.co/2019/04/21/understanding-incremental-decoding-in-fairseq/ "Understanding incremental decoding in fairseq"

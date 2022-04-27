@@ -14,3 +14,13 @@ math:
 busuanzi_count:
   # count values only if the other configs are false
   enable: true
+
+disqus:
+  enable: true
+  count: true
+
+disqusjs:
+  enable: true
+  apikey: ayMYqKzMlbp1OqzejPn99cRzpCFP8AO3gI8p76U4sBXx5e2KbftsDLw76hVnXMmR
+  shortname: i4nevers
+  api: https://disqus.skk.moe/disqus/
