@@ -1,0 +1,12 @@
+scheme: Pisces
+
+language: zh-Hans
+
+sidebar:
+  position: left
+
+math: 
+  mathjax:
+    enable: true
+  enable: true
+  per_page: false
