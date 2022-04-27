@@ -10,3 +10,7 @@ math:
     enable: true
   enable: true
   per_page: false
+
+busuanzi_count:
+  # count values only if the other configs are false
+  enable: true
