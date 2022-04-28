@@ -1,14 +1,15 @@
 ---
 title: 关于Seq2Seq的增量解码
 mathjax: true
-date: 2022-02-21 23:25:19
+date: 2022-03-21 23:25:19
 tags:
   - NLG
   - Decoder
   - 加速
 ---
 
-这几天重构了一版生成模型。相较于各种各样的nlu任务、自然语言生成在工业中的应用并不多，一是由于实际场景下往往需要目标文本“受控”，二是生成过程自回归，无论有多大算力，仍然需要一个个token往外蹦。encoder-decoder架构下的自回归语言模型，如果不做任何优化，整个序列的计算复杂度是长度的三次项。本文旨在讨论解码过程中的性能优化。阅读本文，你需要知道seq2seq模型、了解attention结构、听说过bert/bart，并且最好熟悉tf1.x框架。文中不含开箱即跑的脚本/代码，但是如果你正在寻求加快生成的方法，那么文中的代码片段或许对你有参考价值。
+这几天重构了一版生成模型。相较于各种各样的nlu任务、自然语言生成在工业中的应用并不多，一是由于实际场景下往往需要目标文本“受控”，二是生成过程自回归，无论有多大算力，仍然需要一个个token往外蹦。encoder-decoder架构下的自回归语言模型，如果不做任何优化，整个序列的计算复杂度是长度的三次项。本文旨在讨论解码过程中的性能优化。阅读本文，你需要知道seq2seq模型、了解attention结构、听说过bert/bart，并且最好熟悉tf1.x框架。文中不含开箱即跑的脚本/代码，但是缓存mha的代码片段或许对你有参考价值。
+<!--more-->
 
 ## 模型结构
 
@@ -34,63 +35,101 @@ $$
 V=W_vv
 $$
 
-“MultiHead”没有体现在公式上，实现中添加几个reshape就能做到多头的效果。如果qkv相同，MHA就叫做self-attention，常用在Encoder部分；如果q与kv来自两个输入，MHA叫做cross-attention，常用在Decoder部分。
+“MultiHead”没有体现在公式上，实现中添加几个reshape就能做到多头的效果。如果qkv相同，mha就叫做self-attention，常用在encoder部分；如果q与kv来自两个输入，mha叫做cross-attention，常用在decoder部分。整个模型中，mha结构占了计算量的大头，因此也是缓存设计的“靶点”。
 
-MHA的实现可以参考[google-research/bert][1]。
+mha的实现可以参考[google-research/bert][1]。
 
-## Encoder加速
+## Encoder缓存
 
-encoder部分的输出在解码过程中始终不变，缓存输出，避免重复计算即可。
+输入序列在译码过程中始终不变，因此缓存encoder的结果，避免重复计算即可。
 
-## Decoder加速
+## Decoder缓存
 
-为了方便描述，约定第$n$个token的向量表示为$X_n$，序列为$Seq(n)={X_0,X_1,...,X_n}$，来看decoder中各个结构的缓存方案。
+我们来看decoder中各个结构的缓存方案。为了方便描述，约定第$n$个token的向量表示为$X_n$，前$n$个token的向量表示为$Seq(n)=[X_0,X_1,...,X_n]$。
 
 ### FFN与Add & LayerNorm
 
-FFN层没有token之间的交互，nlp的norm层是在最后一维上计算，这两层在长度这一维上拼接新token输出与缓存就能实现增量计算，计算量由$O(n)$降为$O(1)$。
+FFN层没有token之间的交互，nlp的norm是在最后一维上计算，这两层在长度这一维上拼接新token输出与缓存就能实现增量计算，即
+$$
+FFN(Seq(n)) = concat(Seq(n-1), X_n,axis=0)
+$$
+
+$$
+LayerNorm(Seq(n))=concat(Seq(n-1),X_n,axis=0)
+$$
+
+解码单个token计算量由$O(n)$降为$O(1)$。
+
 ### Decoder Self-Attention
 
 ![incremental-decoder__self-att-mask.drawio](/post_images/incremental-decoder__self-att-mask.drawio.svg)
 
-decoder的self-attention部分，训练中计算att-score时会按照下三角的方式mask，第$n$个token只与前$n-1$个token及自己交互，以防止后续token的“泄漏”。实际上解码第$n$个token时，有效计算只有$Att(X_n,Seq(n),Seq(n))$（图中的紫色行）。前$n-1$个token对$n$及$n$以后的att-score始终为0（图中白色列）。
+decoder的self-attention部分，训练中计算att-score时会按照下三角的方式mask，第$n$个token只与前$n-1$个token及自己交互，以防止后续token的“泄漏”。实际上解码第$n$个token时，有效计算只有$SelfAtt(X_n,Seq(n),Seq(n))$（图中的紫色行），前$n-1$个token对$n$及$n$以后的att-score始终为0（图中白色列）。
 
 ![incremental-decoder__self-att-cal.drawio](/post_images/incremental-decoder__self-att-cal.drawio.svg)
+
+因此，这一步缓存att-score，计算紫色行即可。紫色行的计算中，kv投影结果也可以只计算新token的结果，与前序结果拼接后得到，即
+$$
+SelfAtt(Seq(n-1),Seq(n),Seq(n))=concat(SelfAtt(Seq(n-1),Seq(n-1),Seq(n-1)),0_{(n-1)×1},axis=1)
+$$
+
+$$
+SelfAtt(Seq(n),Seq(n),Seq(n))=concat(SelfAtt(Seq(n-1),Seq(n),Seq(n)),SelfAtt(X_n,Seq(n),Seq(n)),axis=0)
+$$
+
+其中
+$$
+SelfAtt(X_n,Seq(n),Seq(n))=softmax(\frac{Q(X_n)(K(Seq(n)))^T}{\sqrt{d}})V(Seq(n))
+$$
+
+$$
+K(Seq(n))=concat(K(Seq(n-1)), K(X_n),axis=0)
+$$
+
+$$
+V(Seq(n))=concat(V(Seq(n-1)), V(X_n),axis=0)
+$$
 
 实现这一步的缓存，self-attention需要的输入是：
 
 - 第$n$个新token的向量表示（$q$）
 - 第$n-1$步的att-score
-- 第$n-1$步的$W_k(Seq(n-1))$
-- 第$n-1$步的$W_v(Seq(n-1))$
+- 第$n-1$步的$K(Seq(n-1))$
+- 第$n-1$步的$VSeq(n-1))$
 
 输出是：
 
 - att结果
 
 - 第$n$ 步的att-score
-- 第$n$步的$W_k(Seq(n))$
-- 第$n$步的$W_v(Seq(n))$
+- 第$n$步的$K(Seq(n))$
+- 第$n$步的$VSeq(n))$
 
 ### Decoder Cross-Attention
 
 ![incremental-decoder__self-att-mask.drawio](/post_images/incremental-decoder__cross-att-mask.drawio.svg)
 
-decoder的cross-attention部分，训练时att-score会有正方形的mask。不同于下三角，正方形mask下每个新token都会参与计算，而softmax无法增量获取结果，因此解码过程中无法向self-attention那样减少att-score的计算，只能缓存到qkv映射这一步。其中q是encoder输出，始终不变，kv的线性变换可以通过缓存的方式节省计算。实现带缓存的cross-attention需要的输入是：
+decoder的cross-attention部分，训练时att-score会有正方形的mask。不同于下三角，正方形mask下每个新token都会参与计算，而softmax无法增量获取结果，因此解码过程中无法向self-attention那样减少att-score的计算，只能缓存到qkv映射这一步。其中q是encoder输出，始终不变，kv的线性变换可以通过缓存的方式节省计算，即
+$$
+CrossAtt(encoder\_out,Seq(n),Seq(n))=softmax(\frac{Q(encoder\_out)(K(Seq(n)))^T}{\sqrt{d}})V(Seq(n))
+$$
 
-- $W_q(EncoderOut)$
-- 第$n-1$步的$W_k(Seq(n-1))$
-- 第$n-1$步的$W_v(Seq(n-1))$
+
+实现带缓存的cross-attention需要的输入是：
+
+- $Q(EncoderOut)$
+- 第$n-1$步的$K(Seq(n-1))$
+- 第$n-1$步的$V(Seq(n-1))$
 
 输出是：
 
 - att结果
-- 第$n$步的$W_k(Seq(n))$
-- 第$n$步的$W_v(Seq(n))$
+- 第$n$步的$K(Seq(n))$
+- 第$n$步的$V(Seq(n))$
 
-## 计算量
+## 计算量评估
 
-[《线性Transformer应该不是你要的模型》][2]一文中有对计算量的评估，假设$n$为序列长度，$d$为head_size（64），$h$为head的数目（12），$hd$为常说的 hidden_size（768）。我们来看看缓存下的增量解码理论上的计算量评估。
+[《线性Transformer应该不是你要的模型》][2]中有对计算量的评估，假设$n$为序列长度，$d$为head_size（64），$h$为head的数目（12），$hd$为常说的 hidden_size（768）。我们来看看缓存下的增量解码理论上的计算量评估。
 
 ### FFN
 
@@ -105,7 +144,7 @@ FFN层比较简单，无缓存时第一层是$n×hd$的矩阵乘以$hd×4hd$的�
 > 3n(hd)^2+h(n^2d+n^2d)+n(hd)^2=4nh^2d^2+2n^2hd
 > $$
 
-缓存下，计算简化成：
+缓存下，忽略拼接向量与softmax，总计算量是：
 
 $$Att(X_n,Seq(n),Seq(n))=softmax(\frac{(W_qX_n)(W_kSeq(n)))^T}{\sqrt{d}})W_vSeq(n)$$
 
@@ -129,7 +168,12 @@ $$
 - $Q$始终缓存，仅第一次有计算量，这里忽略
 - $K$，$V$为$1×hd$乘$hd×hd$的矩阵，结果与$(n-1)×hd$缓存拼接，得到($n×hd)$的矩阵，计算量为$2(hd)^2$
 - $h$个Attentioin头的运算仍是$h(n^2d+n^2d)$
-- 输出投影变换仍是$n(hd^2)$
+- 输出投影变换仍是$n(hd)^2$
+
+使用缓存的cross-attentioin计算量是：
+$$
+2(hd)^2+h(n^2d+n^2d)+n(hd)^2=2hdn^2+(hd)^2n+2(hd)^2
+$$
 
 ### Total
 
@@ -151,11 +195,13 @@ $$
 | 总共                          | $4n^2hd+16n(hd)^2$ | $2n^2hd+2nhd+2n(hd)^2+14(hd)^2$ |
 | $h=12,d=64$                   | $3072n^2+9437184n$ | $1536n^2+1181184n+8257536$      |
 
-下图展示了目标序列长度$n$与（缓存计算量）/（无缓存计算量）的关系，在长度为128时，计算量只有原来的14.85%（碰巧任务的目标序列长度在120左右）
+以实际参数量来看生成整个序列的计算，下图展示了目标序列长度$n$与（缓存计算量）/（无缓存计算量）的关系。看起来由于cross-attention无法增量，缓存后单个token复杂度仍然是$O(n^2)$，实际在目标序列长度为128时，计算量可以减少到原来的14.85%（碰巧任务的目标序列长度在120左右）。
 
 ![incremental-decoder__self-att-mask.drawio](/post_images/incremental-decoder__cal_ratio.png)
 
 ## Code
+
+基于以上的分析，下面这段mha代码支持有/无缓存情况下的self/cross-att，可以替换google/bert中的attention。
 
 ```python
 import tensorflow as tf
@@ -323,7 +369,7 @@ def multi_head_attention(query: tf.Tensor,
     )
 ```
 
-这段mha代码可以替换google/bert中的attention，根据提供输入的不同，可以实现不同的attention：
+根据提供输入的不同，可以实现不同的attention：
 
 |                       | query                     | key_value                                              | cache_key_value_states                                     |
 | --------------------- | ------------------------- | ------------------------------------------------------ | ---------------------------------------------------------- |
@@ -334,7 +380,7 @@ def multi_head_attention(query: tf.Tensor,
 
 ## 总结
 
-除了缓存，对语料使用sentencepiece或者其他wordpiece方式缩短目标序列长度，也可以加速生成。费劲周折，实现后发现，在k8s的4c机器下，无缓存生成150个token需要30s左右，缓存下为4s左右。但是，如果有块gpu，目标文本长度在200左右的情况下，用不用缓存没多大区别。（ORZ）
+除了缓存，对语料使用sentencepiece或者其他wordpiece方式缩短目标序列长度，也可以加速生成。费劲周折，在k8s的4c机器下，无缓存生成150个token需要30s左右，缓存下为4s左右。但是，如果有块gpu，目标文本长度在200左右的情况下，bert-base这个规模的计算量对大部分gpu来说压力不大，用不用缓存没多大区别（ORZ）。
 
 ## Reference
 1. [google bert mha][1]
