@@ -201,7 +201,7 @@ $$
 
 ## Code
 
-基于以上的分析，下面这段mha代码支持有/无缓存情况下的self/cross-att，可以替换google/bert中的attention。
+基于以上的分析，同时参考了huggingface中的[bart torch版的attention][4]缓存，实现下面这段mha代码支持有/无缓存情况下的self/cross-att，可以替换google/bert中的attention。
 
 ```python
 import tensorflow as tf
@@ -386,7 +386,9 @@ def multi_head_attention(query: tf.Tensor,
 1. [google bert mha][1]
 2. [线性Transformer应该不是你要的模型][2]
 3. [Understanding incremental decoding in fairseq][3]
+4. [huggingface bart attention][4]
 
 [1]: https://github.com/google-research/bert/blob/eedf5716ce1268e56f0a50264a88cafad334ac61/modeling.py#L558 "google bert mha"
 [2]: https://spaces.ac.cn/archives/8610 "线性Transformer应该不是你要的模型"
 [3]: https://www.telesens.co/2019/04/21/understanding-incremental-decoding-in-fairseq/ "Understanding incremental decoding in fairseq"
+[4]: https://github.com/huggingface/transformers/blob/6568752039dfba86ba6eb994fd7e29888d5ed4a8/src/transformers/models/bart/modeling_bart.py#L173 "huggingface bart attention"
