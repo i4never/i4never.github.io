@@ -1,6 +1,5 @@
 scheme: Pisces
 
-language: zh-Hans
 
 sidebar:
   position: left
@@ -15,12 +14,8 @@ busuanzi_count:
   # count values only if the other configs are false
   enable: true
 
-disqus:
+valine:
   enable: true
-  count: true
-
-disqusjs:
-  enable: true
-  apikey: ayMYqKzMlbp1OqzejPn99cRzpCFP8AO3gI8p76U4sBXx5e2KbftsDLw76hVnXMmR
-  shortname: i4nevers
-  api: https://disqus.skk.moe/disqus/
+  appid: w5q6IP0osm99hRrYrGPtiWo2-gzGzoHsz
+  appkey: bs1RDDouIyijDdev01eNL4hD
+  recordIP: true
